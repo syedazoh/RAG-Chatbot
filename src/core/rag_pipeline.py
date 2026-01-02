@@ -1,111 +1,95 @@
-"""
-RAG Pipeline - Skincare Chatbot
-"""
 import os
 import shutil
 from dotenv import load_dotenv
 
-# Document Loading & Splitting
 from langchain_community.document_loaders import DirectoryLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-
-# Vector Store & Embeddings
 from langchain_community.vectorstores import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
-
-# LLM & Prompts
-from langchain_community.chat_models import ChatOllama
+from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
 
-# --- THE CRITICAL LEGACY IMPORTS ---
-from langchain_classic.chains import create_retrieval_chain
-from langchain_classic.chains.combine_documents import create_stuff_documents_chain
-
-# Load environment variables
 load_dotenv()
 
-# Configuration
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 CHROMA_DB_DIR = "./chroma_db"
 DOCUMENTS_DIR = "./documents"
 
-# Initialize Embeddings
 embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
 def ingest_documents():
-    """Load documents, chunk them, and store in local vector store."""
-    print("🔄 Starting document ingestion...")
-    
+    """Load, chunk, and store documents."""
     if not os.path.exists(DOCUMENTS_DIR):
         os.makedirs(DOCUMENTS_DIR)
-        print(f"📁 Created {DOCUMENTS_DIR} folder.")
         return
 
-    try:
-        txt_loader = DirectoryLoader(
-            DOCUMENTS_DIR,
-            glob="data.txt",
-            loader_cls=TextLoader,
-            loader_kwargs={'encoding': 'utf-8'}
-        )
-        documents = txt_loader.load()
-        print(f"📄 Loaded {len(documents)} TXT files")
-    except Exception as e:
-        print(f"⚠️ Error loading documents: {e}")
-        return
+    txt_loader = DirectoryLoader(
+        DOCUMENTS_DIR,
+        glob="data.txt",
+        loader_cls=TextLoader,
+        loader_kwargs={'encoding': 'utf-8'}
+    )
+    documents = txt_loader.load()
 
     if not documents:
-        print("⚠️ No content found in data.txt.")
         return
 
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
     chunks = text_splitter.split_documents(documents)
-    print(f"✂️ Split into {len(chunks)} chunks") 
 
-    print("💾 Creating vector store...")
-    try:
-        if os.path.exists(CHROMA_DB_DIR):
-            shutil.rmtree(CHROMA_DB_DIR)
+    if os.path.exists(CHROMA_DB_DIR):
+        shutil.rmtree(CHROMA_DB_DIR)
 
-        vectorstore = Chroma.from_documents(
-            documents=chunks,
-            embedding=embeddings,
-            persist_directory=CHROMA_DB_DIR
-        )
-        print(f"✅ Ingestion complete!")
-        return vectorstore
-    except Exception as e:
-        print(f"❌ DATABASE ERROR: {e}")
-        return None
+    vectorstore = Chroma.from_documents(
+        documents=chunks,
+        embedding=embeddings,
+        persist_directory=CHROMA_DB_DIR
+    )
+    return vectorstore
 
 def get_rag_chain():
-    """Initialize the RAG chain using OpenRouter."""
+    """Returns a FUNCTION that app.py can call directly."""
     if not os.path.exists(CHROMA_DB_DIR):
-        print("⚠️ Database directory not found.")
-        return None
+        ingest_documents()
     
     vectorstore = Chroma(
         persist_directory=CHROMA_DB_DIR,
         embedding_function=embeddings
     )
     
-    # Line 92 - Indented exactly 4 spaces
-    llm = ChatOllama(
-    model="llama3",
-    temperature=0
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
+    
+    llm = ChatGroq(
+    groq_api_key=os.getenv("GROQ_API_KEY"),
+    model_name="llama-3.1-8b-instant", # <--- CHANGE THIS LINE
+    temperature=0.2
 )
     
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", "You are a Skincare Assistant. Context: {context}"),
-        ("human", "{input}")
-    ])
+    prompt_template = ChatPromptTemplate.from_template("""
+    You are a professional skincare assistant. Use the context below to answer the user's question.
+    If the answer isn't in the context, say "I don't know based on the provided data."
+
+    Context: {context}
+    Question: {question}
     
-    question_answer_chain = create_stuff_documents_chain(llm, prompt)
-    
-    return create_retrieval_chain(
-        vectorstore.as_retriever(), 
-        question_answer_chain
-    )
+    Answer:""")
+
+    # This is the function app.py will actually use
+    def rag_handler(user_query):
+        # 1. Get documents
+        docs = retriever.invoke(user_query)
+        context = "\n\n".join([d.page_content for d in docs])
+        
+        # 2. Get answer from LLM
+        chain = prompt_template | llm
+        response = chain.invoke({"context": context, "question": user_query})
+        
+        # 3. Format for Streamlit
+        return {
+            "answer": response.content,
+            "sources": list(set([os.path.basename(d.metadata.get("source", "data.txt")) for d in docs]))
+        }
+
+    return rag_handler
 
 if __name__ == "__main__":
     ingest_documents()
