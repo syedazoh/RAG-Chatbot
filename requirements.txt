@@ -1,8 +1,7 @@
-﻿streamlit
-langchain
-langchain-community
-langchain-text-splitters
-chromadb
-sentence-transformers
-huggingface-hub
+langchain-groq
 langchain-huggingface
+langchain-community
+langchain-chroma
+streamlit
+python-dotenv
+sentence-transformers
